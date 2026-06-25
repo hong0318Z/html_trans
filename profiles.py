@@ -55,6 +55,7 @@ def _default_profile() -> dict:
         "target_lang": "English",
         "style_presets": [],
         "character_styles": {},
+        "translation_instructions": "",
         "created_at": "",
         "updated_at": "",
     }
@@ -119,6 +120,7 @@ def new_profile(game_name: str, rule_text: str = "") -> dict:
         "target_lang": "English",
         "style_presets": [],
         "character_styles": {},
+        "translation_instructions": "",
     }
 
 

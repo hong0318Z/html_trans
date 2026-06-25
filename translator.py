@@ -8,7 +8,7 @@ import llm_client
 SYSTEM_PROMPT_TEMPLATE = """You are a professional game localization translator.
 Translate each value in the given JSON object into {target_lang}.
 Preserve placeholders, line breaks, and formatting markers exactly.
-{style_block}Respond with ONLY a JSON object that has the exact same keys as the input,
+{instructions_block}{style_block}Respond with ONLY a JSON object that has the exact same keys as the input,
 where each value is the translated text. No explanation, no extra keys."""
 
 
@@ -19,6 +19,12 @@ def _style_block(style_examples: list) -> str:
     if not lines:
         return ""
     return f"Match this translation style/tone, as shown by these examples:\n{lines}\n\n"
+
+
+def _instructions_block(instructions: str) -> str:
+    if not instructions or not instructions.strip():
+        return ""
+    return f"Additional instructions from the translator:\n{instructions.strip()}\n\n"
 
 
 def dedup_spans(spans: list) -> tuple:
@@ -83,10 +89,11 @@ def make_batches(unique_texts: list, num_batches: int) -> list:
 
 
 def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: str,
-                     style_examples: list = None) -> dict:
+                     style_examples: list = None, instructions: str = None) -> dict:
     payload = {str(i): text for i, text in enumerate(texts)}
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         target_lang=target_lang, style_block=_style_block(style_examples),
+        instructions_block=_instructions_block(instructions),
     )
     messages = [
         {"role": "system", "content": system_prompt},
@@ -126,12 +133,12 @@ def sample_for_style(spans: list, n: int = 10) -> list:
 
 
 def suggest_style_examples(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
-                            n: int = 10) -> list:
+                            n: int = 10, instructions: str = None) -> list:
     sample_texts = sample_for_style(spans, n)
     if not sample_texts:
         return []
     try:
-        result = translate_batch(api_key, provider_cfg, sample_texts, target_lang)
+        result = translate_batch(api_key, provider_cfg, sample_texts, target_lang, instructions=instructions)
     except Exception:
         result = {}
     return [{"source": t, "target": result.get(t, "")} for t in sample_texts]
@@ -182,7 +189,8 @@ def translations_from_checkpoint(spans: list, checkpoint_path: str) -> dict:
 
 def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
                    num_batches: int, style_examples: list = None, char_style_examples: dict = None,
-                   progress_cb=None, checkpoint_path: str = None, max_workers: int = 4) -> dict:
+                   progress_cb=None, checkpoint_path: str = None, max_workers: int = 4,
+                   instructions: str = None) -> dict:
     """Translate spans, batching per speaker so each character's lines can use
     that character's own style examples (falling back to the global ones).
 
@@ -228,7 +236,7 @@ def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: st
         texts = [unique[i]["text"] for i in idxs]
         examples = (char_style_examples or {}).get(speaker) or style_examples
         try:
-            result = translate_batch(api_key, provider_cfg, texts, target_lang, examples)
+            result = translate_batch(api_key, provider_cfg, texts, target_lang, examples, instructions)
         except Exception:
             return speaker, {}, list(idxs)
         job_translations, job_failed = {}, []
