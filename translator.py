@@ -5,8 +5,17 @@ import llm_client
 SYSTEM_PROMPT_TEMPLATE = """You are a professional game localization translator.
 Translate each value in the given JSON object into {target_lang}.
 Preserve placeholders, line breaks, and formatting markers exactly.
-Respond with ONLY a JSON object that has the exact same keys as the input,
+{style_block}Respond with ONLY a JSON object that has the exact same keys as the input,
 where each value is the translated text. No explanation, no extra keys."""
+
+
+def _style_block(style_examples: list) -> str:
+    if not style_examples:
+        return ""
+    lines = "\n".join(f'- "{ex["source"]}" -> "{ex["target"]}"' for ex in style_examples if ex.get("source"))
+    if not lines:
+        return ""
+    return f"Match this translation style/tone, as shown by these examples:\n{lines}\n\n"
 
 
 def dedup_spans(spans: list) -> tuple:
@@ -45,10 +54,14 @@ def make_batches(unique_texts: list, num_batches: int) -> list:
     return [sorted(b) for b in batches if b]
 
 
-def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: str) -> dict:
+def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: str,
+                     style_examples: list = None) -> dict:
     payload = {str(i): text for i, text in enumerate(texts)}
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        target_lang=target_lang, style_block=_style_block(style_examples),
+    )
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE.format(target_lang=target_lang)},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
     ]
     content, _usage = llm_client.chat(
@@ -74,7 +87,7 @@ def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: 
 
 
 def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
-                   num_batches: int, progress_cb=None) -> dict:
+                   num_batches: int, style_examples: list = None, progress_cb=None) -> dict:
     unique_texts, span_to_unique = dedup_spans(spans)
     batches = make_batches(unique_texts, num_batches)
 
@@ -84,7 +97,7 @@ def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: st
     for done, batch_indices in enumerate(batches):
         texts = [unique_texts[i] for i in batch_indices]
         try:
-            result = translate_batch(api_key, provider_cfg, texts, target_lang)
+            result = translate_batch(api_key, provider_cfg, texts, target_lang, style_examples)
             text_translations.update(result)
             for t in texts:
                 if t not in result:

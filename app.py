@@ -27,12 +27,55 @@ def refresh_profile_list():
 
 def on_profile_select(game_name):
     if not game_name:
-        return "", "", "English", None
+        return "", "", "English", None, gr.update(choices=[])
     for p in profiles.list_profiles():
         if p["game_name"] == game_name:
             prof = profiles.load_profile(p["slug"])
-            return prof.get("rule_text", ""), prof.get("extraction_code", ""), prof.get("target_lang", "English"), prof
-    return "", "", "English", None
+            preset_names = profiles.list_style_presets(prof)
+            return (prof.get("rule_text", ""), prof.get("extraction_code", ""),
+                    prof.get("target_lang", "English"), prof, gr.update(choices=preset_names))
+    return "", "", "English", None, gr.update(choices=[])
+
+
+def _table_to_examples(table) -> list:
+    if table is None:
+        return []
+    rows = table.values.tolist() if hasattr(table, "values") else table
+    examples = []
+    for row in rows:
+        if not row or not row[0] or str(row[0]).strip() == "":
+            continue
+        src = str(row[0]).strip()
+        tgt = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+        examples.append({"source": src, "target": tgt})
+    return examples
+
+
+def on_save_style(game_name, profile_state, table, preset_name):
+    if not preset_name.strip():
+        return "프리셋 이름을 입력하세요.", profile_state, gr.update()
+    if not game_name.strip():
+        return "게임 이름을 입력하세요.", profile_state, gr.update()
+
+    if profile_state and profile_state.get("game_name") == game_name:
+        prof = profile_state
+    else:
+        prof = profiles.new_profile(game_name)
+
+    examples = _table_to_examples(table)
+    profiles.save_style_preset(prof, preset_name, examples)
+    profiles.save_profile(prof)
+    preset_names = profiles.list_style_presets(prof)
+    return f"프리셋 '{preset_name}' 저장됨.", prof, gr.update(choices=preset_names)
+
+
+def on_load_style_preset(profile_state, preset_name):
+    if not profile_state or not preset_name:
+        return []
+    preset = profiles.get_style_preset(profile_state, preset_name)
+    if not preset:
+        return []
+    return [[ex["source"], ex["target"]] for ex in preset["examples"]]
 
 
 def on_analyze(html_text, rule_text, provider_name, model_name, api_key, prior_code, prior_error):
@@ -96,16 +139,21 @@ def on_save_profile(game_name, rule_text, code, target_lang, existing_profile):
     return f"프로필 '{game_name}' 저장됨.", prof
 
 
-def on_translate(html_text, spans, provider_name, model_name, api_key, target_lang, num_batches, progress=gr.Progress()):
+def on_translate(html_text, spans, provider_name, model_name, api_key, target_lang, num_batches,
+                  style_table, progress=gr.Progress()):
     if not html_text or not spans:
         return None, "먼저 분석을 실행해 추출 결과를 만들어주세요."
 
     provider_cfg = {"base_url": PROVIDERS[provider_name]["base_url"], "model": model_name}
+    style_examples = _table_to_examples(style_table)
 
     def cb(done, total):
         progress((done, total))
 
-    result = translator.translate_all(api_key, provider_cfg, spans, target_lang, int(num_batches), progress_cb=cb)
+    result = translator.translate_all(
+        api_key, provider_cfg, spans, target_lang, int(num_batches),
+        style_examples=style_examples, progress_cb=cb,
+    )
     translated_html = reinserter.reinsert(html_text, spans, result["translations"])
 
     OUTPUTS_DIR.mkdir(exist_ok=True)
@@ -151,6 +199,19 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     save_profile_btn = gr.Button("프로필 저장")
     save_status = gr.Textbox(label="저장 상태", interactive=False)
 
+    gr.Markdown("### 번역 스타일 프리셋")
+    gr.Markdown("예: 원문 `hi` -> 번역 `안녕` 처럼 원하는 말투/스타일의 예시 몇 개를 적어두면 번역할 때 참고합니다.")
+    style_table = gr.Dataframe(
+        headers=["원문", "번역"], datatype=["str", "str"],
+        row_count=(5, "dynamic"), column_count=(2, "fixed"),
+        label="스타일 예시",
+    )
+    with gr.Row():
+        style_preset_name = gr.Textbox(label="프리셋 이름 (예: 1번 - 캐쥬얼 번역)")
+        save_style_btn = gr.Button("프리셋으로 저장")
+        style_preset_dropdown = gr.Dropdown(label="저장된 프리셋 불러오기", choices=[])
+    style_status = gr.Textbox(label="프리셋 상태", interactive=False)
+
     gr.Markdown("### 번역")
     with gr.Row():
         total_spans_box = gr.Textbox(label="전체 추출 문장 수", interactive=False)
@@ -167,9 +228,19 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     profile_dropdown.change(
         on_profile_select, inputs=profile_dropdown,
-        outputs=[rule_text_input, code_box, target_lang_input, profile_state],
+        outputs=[rule_text_input, code_box, target_lang_input, profile_state, style_preset_dropdown],
     )
     profile_dropdown.change(lambda name: name, inputs=profile_dropdown, outputs=game_name_input)
+
+    save_style_btn.click(
+        on_save_style,
+        inputs=[game_name_input, profile_state, style_table, style_preset_name],
+        outputs=[style_status, profile_state, style_preset_dropdown],
+    )
+
+    style_preset_dropdown.change(
+        on_load_style_preset, inputs=[profile_state, style_preset_dropdown], outputs=style_table,
+    )
 
     provider_dropdown.change(
         lambda name: gr.update(choices=PROVIDERS[name]["models"]),
@@ -199,7 +270,8 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     translate_btn.click(
         on_translate,
-        inputs=[html_state, spans_state, provider_dropdown, model_dropdown, api_key_input, target_lang_input, batch_count_input],
+        inputs=[html_state, spans_state, provider_dropdown, model_dropdown, api_key_input,
+                target_lang_input, batch_count_input, style_table],
         outputs=[download_file, translate_summary],
     )
 

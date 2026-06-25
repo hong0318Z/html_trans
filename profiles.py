@@ -55,4 +55,23 @@ def new_profile(game_name: str, rule_text: str = "") -> dict:
         "rule_text": rule_text,
         "extraction_code": "",
         "target_lang": "English",
+        "style_presets": [],
     }
+
+
+def list_style_presets(profile: dict) -> list:
+    return [p["name"] for p in profile.get("style_presets", [])]
+
+
+def get_style_preset(profile: dict, name: str) -> dict:
+    for preset in profile.get("style_presets", []):
+        if preset["name"] == name:
+            return preset
+    return None
+
+
+def save_style_preset(profile: dict, name: str, examples: list) -> dict:
+    profile.setdefault("style_presets", [])
+    profile["style_presets"] = [p for p in profile["style_presets"] if p["name"] != name]
+    profile["style_presets"].append({"name": name, "examples": examples})
+    return profile
