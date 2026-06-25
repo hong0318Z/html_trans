@@ -1,4 +1,5 @@
 import multiprocessing
+import queue as queue_module
 import traceback
 
 
@@ -16,21 +17,23 @@ def _worker(code_str: str, html: str, queue: multiprocessing.Queue) -> None:
         queue.put(("error", traceback.format_exc()))
 
 
-def run_extraction(code_str: str, html: str, timeout_sec: int = 15) -> dict:
+def run_extraction(code_str: str, html: str, timeout_sec: int = 90) -> dict:
     queue = multiprocessing.Queue()
     proc = multiprocessing.Process(target=_worker, args=(code_str, html, queue))
     proc.start()
-    proc.join(timeout_sec)
 
-    if proc.is_alive():
+    # Read from the queue *before* joining: a child producing a large payload
+    # (many spans) can block on queue.put() once the pipe buffer fills, and
+    # join()-ing first would deadlock both sides until the timeout fires.
+    try:
+        status, payload = queue.get(timeout=timeout_sec)
+    except queue_module.Empty:
         proc.terminate()
         proc.join()
         return {"spans": [], "error": f"Extraction timed out after {timeout_sec}s.", "raised": None}
 
-    if queue.empty():
-        return {"spans": [], "error": f"Extraction process exited unexpectedly (code={proc.exitcode}).", "raised": None}
+    proc.join()
 
-    status, payload = queue.get()
     if status == "error":
         return {"spans": [], "error": "Extraction code raised an exception.", "raised": payload}
 
