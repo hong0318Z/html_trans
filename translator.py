@@ -1,4 +1,6 @@
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import llm_client
@@ -180,14 +182,18 @@ def translations_from_checkpoint(spans: list, checkpoint_path: str) -> dict:
 
 def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
                    num_batches: int, style_examples: list = None, char_style_examples: dict = None,
-                   progress_cb=None, checkpoint_path: str = None) -> dict:
+                   progress_cb=None, checkpoint_path: str = None, max_workers: int = 4) -> dict:
     """Translate spans, batching per speaker so each character's lines can use
     that character's own style examples (falling back to the global ones).
 
+    Batches are independent HTTP calls, so up to max_workers of them run
+    concurrently rather than one-at-a-time -- the LLM call latency dominates,
+    not local CPU, so this is a near-linear speedup.
+
     If checkpoint_path is given, already-translated (speaker, text) pairs found
     there are reused (resuming a previously interrupted run), and progress is
-    written back to the same file after every batch so an interruption never
-    loses more than one batch's worth of work."""
+    written back to the same file after every completed batch so an
+    interruption never loses more than one in-flight batch's worth of work."""
     unique, span_to_unique = dedup_spans_by_speaker(spans)
     checkpoint = load_checkpoint(checkpoint_path)
 
@@ -215,23 +221,38 @@ def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: st
 
     failed_indices = []
     total = len(batch_jobs)
-    for done, (speaker, idxs) in enumerate(batch_jobs):
+    done_count = 0
+    lock = threading.Lock()
+
+    def run_job(speaker, idxs):
         texts = [unique[i]["text"] for i in idxs]
         examples = (char_style_examples or {}).get(speaker) or style_examples
         try:
             result = translate_batch(api_key, provider_cfg, texts, target_lang, examples)
-            for i, t in zip(idxs, texts):
-                if t in result:
-                    idx_translations[i] = result[t]
-                    checkpoint[_checkpoint_key(speaker, t)] = result[t]
-                else:
-                    failed_indices.append(i)
         except Exception:
-            failed_indices.extend(idxs)
-        if checkpoint_path:
-            save_checkpoint(checkpoint_path, checkpoint)
-        if progress_cb:
-            progress_cb(done + 1, total)
+            return speaker, {}, list(idxs)
+        job_translations, job_failed = {}, []
+        for i, t in zip(idxs, texts):
+            if t in result:
+                job_translations[i] = result[t]
+            else:
+                job_failed.append(i)
+        return speaker, job_translations, job_failed
+
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as executor:
+        futures = [executor.submit(run_job, speaker, idxs) for speaker, idxs in batch_jobs]
+        for future in as_completed(futures):
+            speaker, job_translations, job_failed = future.result()
+            with lock:
+                for i, t in job_translations.items():
+                    idx_translations[i] = t
+                    checkpoint[_checkpoint_key(speaker, unique[i]["text"])] = t
+                failed_indices.extend(job_failed)
+                if checkpoint_path:
+                    save_checkpoint(checkpoint_path, checkpoint)
+                done_count += 1
+                if progress_cb:
+                    progress_cb(done_count, total)
 
     translations = {}
     for span_idx, unique_idx in span_to_unique.items():

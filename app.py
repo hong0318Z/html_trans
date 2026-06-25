@@ -249,7 +249,7 @@ def on_save_profile(game_name, rule_text, code, target_lang, existing_profile, c
 
 
 def on_translate(html_text, spans, provider_name, model_name, api_key, target_lang, num_batches,
-                  style_table, char_styles_state, game_name, fresh_start, progress=gr.Progress()):
+                  style_table, char_styles_state, game_name, fresh_start, max_workers, progress=gr.Progress()):
     if not html_text or not spans:
         return None, "먼저 분석을 실행해 추출 결과를 만들어주세요."
 
@@ -267,7 +267,7 @@ def on_translate(html_text, spans, provider_name, model_name, api_key, target_la
     result = translator.translate_all(
         api_key, provider_cfg, spans, target_lang, int(num_batches),
         style_examples=style_examples, char_style_examples=char_styles_state, progress_cb=cb,
-        checkpoint_path=str(checkpoint_path),
+        checkpoint_path=str(checkpoint_path), max_workers=int(max_workers),
     )
     translated_html = reinserter.reinsert(html_text, spans, result["translations"])
 
@@ -362,6 +362,10 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
                 "아래 '체크포인트로 지금까지 결과 받기' 버튼으로 그때까지 번역된 부분만 반영된 HTML을 받을 수 있고, "
                 "'번역 실행'을 다시 누르면 처음부터가 아니라 멈췄던 지점부터 이어서 진행됩니다.")
     batch_count_input = gr.Number(label="번역 호출을 나눌 횟수 (배치 개수)", value=1, precision=0)
+    max_workers_input = gr.Number(
+        label="동시 요청 수 (배치를 동시에 몇 개씩 보낼지)", value=4, precision=0,
+        info="배치들은 서로 독립적인 LLM 호출이라 동시에 보낼수록 거의 그만큼 빨라집니다. API의 동시 요청 제한을 넘지 않게 조절하세요.",
+    )
     fresh_start_checkbox = gr.Checkbox(label="체크포인트 무시하고 처음부터 새로 번역", value=False)
     translate_btn = gr.Button("4단계: 번역 실행")
     build_checkpoint_btn = gr.Button("체크포인트로 지금까지 결과 받기")
@@ -439,7 +443,7 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
         on_translate,
         inputs=[html_state, spans_state, provider_dropdown, model_dropdown, api_key_input,
                 target_lang_input, batch_count_input, style_table, character_styles_state,
-                game_name_input, fresh_start_checkbox],
+                game_name_input, fresh_start_checkbox, max_workers_input],
         outputs=[download_file, translate_summary],
     )
 
