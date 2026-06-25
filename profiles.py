@@ -12,21 +12,31 @@ _DEFAULT_RULE_TEXT = (
     "`<<nextStage ...>>`, `<<editcycle ...>>`, `<<s $변수>>`, `<<if ...>>...<</if>>`, "
     "`<<set ...>>` 등 인자가 있거나 게임 로직/변수를 다루는 매크로는 절대 추출 대상이 아니다. "
     "대사 텍스트 안에 `<<s $brotherName>>` 같은 변수 매크로가 섞여 있으면 그 부분은 그대로 "
-    "보존하고 나머지 자연어 부분만 번역 대상으로 포함한다."
+    "보존하고 나머지 자연어 부분만 번역 대상으로 포함한다. Twine으로 컴파일된 HTML은 "
+    "`<tw-passagedata>` 안에 원본 텍스트가 HTML 엔티티로 escape되어 `&lt;&lt;이름&gt;&gt;대사"
+    "&lt;&lt;/이름&gt;&gt;` 형태로 저장되어 있을 수도 있다 (literal `<<`가 아니라 `&lt;&lt;`). "
+    "두 형태(escape됨/안 됨) 모두 처리해야 한다."
 )
 
 _DEFAULT_EXTRACTION_CODE = '''import re
 
 def extract(html: str) -> list:
     spans = []
-    for m in re.finditer(r'<<([A-Za-z_]\\w*)>>(.*?)<</\\1>>', html, re.DOTALL):
-        body = m.group(2)
-        stripped = body.strip()
-        if not stripped:
-            continue
-        offset = body.find(stripped)
-        start = m.start(2) + offset
-        spans.append({"start": start, "end": start + len(stripped), "text": stripped})
+    patterns = [
+        r'&lt;&lt;([A-Za-z_]\\w*)&gt;&gt;(.*?)&lt;&lt;/\\1&gt;&gt;',
+        r'<<([A-Za-z_]\\w*)>>(.*?)<</\\1>>',
+    ]
+    for pattern in patterns:
+        for m in re.finditer(pattern, html, re.DOTALL):
+            body = m.group(2)
+            stripped = body.strip()
+            if not stripped:
+                continue
+            offset = body.find(stripped)
+            start = m.start(2) + offset
+            spans.append({"start": start, "end": start + len(stripped), "text": stripped})
+        if spans:
+            break
     return spans
 '''
 
