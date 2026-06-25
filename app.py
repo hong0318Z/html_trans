@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -40,11 +41,26 @@ def on_upload(file):
     if size == 0:
         return "", f"파일이 0바이트입니다 (경로: {path}). 업로드가 끝나기 전에 읽힌 것 같습니다."
 
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return "", f"파일 읽기 실패 ({path}, {size}바이트): {e}"
+    # Large uploads can report their final size on disk slightly before all
+    # bytes are actually flushed/visible to a read, so retry briefly rather
+    # than trusting the first read.
+    data = b""
+    for _ in range(15):
+        try:
+            data = p.read_bytes()
+        except Exception as e:
+            return "", f"파일 읽기 실패 ({path}, {size}바이트): {e}"
+        if len(data) >= size:
+            break
+        time.sleep(0.3)
 
+    if len(data) < size:
+        return "", (
+            f"파일이 아직 전송 중인 것 같습니다 (디스크 크기 {size}바이트, "
+            f"실제로 읽은 바이트 {len(data)}). 잠시 기다린 뒤 다시 업로드해주세요."
+        )
+
+    text = data.decode("utf-8", errors="replace")
     return text, f"{len(text.splitlines())}줄, {len(text)}자 로드됨. (파일 크기: {size}바이트)"
 
 
