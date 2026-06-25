@@ -1,0 +1,125 @@
+import time
+
+from openai import OpenAI
+
+DEFAULT_BASE_URL = "http://192.168.0.116:8000/v1"
+AVAILABLE_MODELS = [
+    "mlx-community--gemma-4-26b-a4b-it-8bit",
+    "Qwen3.6-35B-A3B-4bit",
+    "gpt-oss-20b-MXFP4-Q8",
+]
+DEFAULT_MODEL = AVAILABLE_MODELS[0]
+
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+DEEPSEEK_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash"]
+
+ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_MODELS = ["claude-sonnet-4-6", "claude-haiku-4-5"]
+
+GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GOOGLE_MODELS = ["gemini-3.5-pro", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3.1-flash"]
+
+PROVIDERS = {
+    "로컬 서버 (OpenAI 호환)": {"base_url": DEFAULT_BASE_URL, "models": AVAILABLE_MODELS},
+    "DeepSeek API": {"base_url": DEEPSEEK_BASE_URL, "models": DEEPSEEK_MODELS},
+    "Anthropic (Claude)": {"base_url": ANTHROPIC_BASE_URL, "models": ANTHROPIC_MODELS},
+    "Google (Gemini)": {"base_url": GOOGLE_BASE_URL, "models": GOOGLE_MODELS},
+}
+
+MAX_TOKENS = 32768
+MAX_HISTORY_MESSAGES = 20
+REQUEST_TIMEOUT = 300
+
+
+def trim_history(history: list) -> list:
+    if not history:
+        return []
+    return history[-MAX_HISTORY_MESSAGES:]
+
+
+def _client(api_key: str, base_url: str) -> OpenAI:
+    return OpenAI(
+        api_key=api_key or "local",
+        base_url=base_url or DEFAULT_BASE_URL,
+        timeout=REQUEST_TIMEOUT,
+    )
+
+
+def _log_usage(prefix: str, usage) -> None:
+    if not usage:
+        return
+    cached = None
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        cached = getattr(details, "cached_tokens", None)
+    if cached:
+        print(f"[llm] {prefix} usage={usage} cache_hit_tokens={cached}")
+    else:
+        print(f"[llm] {prefix} usage={usage}")
+
+
+def _usage_dict(usage, elapsed: float) -> dict:
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+        "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        "elapsed": elapsed,
+    }
+
+
+def chat(api_key: str, messages: list, temperature: float = 0.7,
+         model: str = None, base_url: str = None, response_format=None) -> tuple:
+    """Returns (content, usage_dict) where usage_dict has prompt_tokens/completion_tokens/elapsed."""
+    model = model or DEFAULT_MODEL
+    client = _client(api_key, base_url)
+    started = time.time()
+    print(f"[llm] request: model={model} messages={len(messages)} chars={sum(len(m['content']) for m in messages)}")
+    kwargs = dict(model=model, messages=messages, max_tokens=MAX_TOKENS, temperature=temperature)
+    if response_format:
+        kwargs["response_format"] = response_format
+    resp = client.chat.completions.create(**kwargs)
+    elapsed = time.time() - started
+    content = resp.choices[0].message.content
+    _log_usage(f"done: elapsed={elapsed:.1f}s", resp.usage)
+    return content, _usage_dict(resp.usage, elapsed)
+
+
+def chat_stream(api_key: str, messages: list, temperature: float = 0.7,
+                model: str = None, base_url: str = None, response_format=None):
+    """Yields (accumulated_text, finish_reason, usage_dict).
+    usage_dict is None for mid-stream yields and populated only on the final yield."""
+    model = model or DEFAULT_MODEL
+    client = _client(api_key, base_url)
+    started = time.time()
+    print(f"[llm] stream: model={model} messages={len(messages)} chars={sum(len(m['content']) for m in messages)}")
+    kwargs = dict(model=model, messages=messages, max_tokens=MAX_TOKENS, temperature=temperature, stream=True,
+                  stream_options={"include_usage": True})
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    full = ""
+    finish_reason = None
+    usage = None
+    try:
+        stream_ctx = client.chat.completions.create(**kwargs)
+    except Exception:
+        # some local/OpenAI-compat servers reject stream_options entirely
+        kwargs.pop("stream_options", None)
+        stream_ctx = client.chat.completions.create(**kwargs)
+
+    with stream_ctx as stream:
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = choice.delta.content or ""
+            if delta:
+                full += delta
+                yield full, None, None
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+    elapsed = time.time() - started
+    _log_usage(f"stream done: elapsed={elapsed:.1f}s chars={len(full)} finish_reason={finish_reason}", usage)
+    yield full, finish_reason, _usage_dict(usage, elapsed)
