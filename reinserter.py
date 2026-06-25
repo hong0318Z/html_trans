@@ -10,9 +10,13 @@ def check_overlaps(spans: list) -> list:
 
 def reinsert(html: str, spans: list, translations: dict) -> str:
     items = [(i, s) for i, s in enumerate(spans) if i in translations]
-    items.sort(key=lambda pair: pair[1]["start"], reverse=True)
+    items.sort(key=lambda pair: pair[1]["start"])
 
-    out = html
+    pieces = []
+    last = 0
     for idx, span in items:
-        out = out[:span["start"]] + translations[idx] + out[span["end"]:]
-    return out
+        pieces.append(html[last:span["start"]])
+        pieces.append(translations[idx])
+        last = span["end"]
+    pieces.append(html[last:])
+    return "".join(pieces)
