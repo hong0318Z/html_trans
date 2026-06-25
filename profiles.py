@@ -5,6 +5,46 @@ from pathlib import Path
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
 
+_DEFAULT_RULE_TEXT = (
+    "텍스트는 `<<이름>>대사 내용<</이름>>` 형태로 감싸여 있다. 여는 태그와 닫는 태그의 "
+    "'이름'은 항상 동일한 화자 식별자(예: Amy, Mc)다. 이 화자 이름표(<<이름>> 자체)는 "
+    "절대 추출하지 말고, 태그 사이의 대사 텍스트만 추출한다. `<<button ...>>...<</button>>`, "
+    "`<<nextStage ...>>`, `<<editcycle ...>>`, `<<s $변수>>`, `<<if ...>>...<</if>>`, "
+    "`<<set ...>>` 등 인자가 있거나 게임 로직/변수를 다루는 매크로는 절대 추출 대상이 아니다. "
+    "대사 텍스트 안에 `<<s $brotherName>>` 같은 변수 매크로가 섞여 있으면 그 부분은 그대로 "
+    "보존하고 나머지 자연어 부분만 번역 대상으로 포함한다."
+)
+
+_DEFAULT_EXTRACTION_CODE = '''import re
+
+def extract(html: str) -> list:
+    spans = []
+    for m in re.finditer(r'<<([A-Za-z_]\\w*)>>(.*?)<</\\1>>', html, re.DOTALL):
+        body = m.group(2)
+        stripped = body.strip()
+        if not stripped:
+            continue
+        offset = body.find(stripped)
+        start = m.start(2) + offset
+        spans.append({"start": start, "end": start + len(stripped), "text": stripped})
+    return spans
+'''
+
+DEFAULT_SLUG = "__default__"
+
+
+def _default_profile() -> dict:
+    return {
+        "slug": DEFAULT_SLUG,
+        "game_name": "기본 프리셋 (Twine 화자 대사)",
+        "rule_text": _DEFAULT_RULE_TEXT,
+        "extraction_code": _DEFAULT_EXTRACTION_CODE,
+        "target_lang": "English",
+        "style_presets": [],
+        "created_at": "",
+        "updated_at": "",
+    }
+
 
 def slugify(game_name: str) -> str:
     slug = re.sub(r"[^a-z0-9가-힣]+", "-", game_name.strip().lower()).strip("-")
@@ -31,10 +71,18 @@ def list_profiles() -> list:
             "updated_at": data.get("updated_at", ""),
         })
     profiles.sort(key=lambda p: p["updated_at"], reverse=True)
-    return profiles
+
+    default_entry = {
+        "slug": DEFAULT_SLUG,
+        "game_name": _default_profile()["game_name"],
+        "updated_at": "",
+    }
+    return [default_entry] + profiles
 
 
 def load_profile(slug: str) -> dict:
+    if slug == DEFAULT_SLUG:
+        return _default_profile()
     path = PROFILES_DIR / f"{slug}.json"
     return json.loads(path.read_text(encoding="utf-8"))
 

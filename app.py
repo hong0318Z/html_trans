@@ -78,6 +78,24 @@ def on_load_style_preset(profile_state, preset_name):
     return [[ex["source"], ex["target"]] for ex in preset["examples"]]
 
 
+def on_suggest_style(spans, provider_name, model_name, api_key, target_lang):
+    if not spans:
+        return "먼저 분석을 실행해 추출 결과를 만들어주세요.", gr.update()
+
+    provider_cfg = {"base_url": PROVIDERS[provider_name]["base_url"], "model": model_name}
+    unique_texts, _ = translator.dedup_spans(spans)
+    examples = translator.suggest_style_examples(api_key, provider_cfg, unique_texts, target_lang)
+    if not examples:
+        return "추천할 문장이 없습니다.", gr.update()
+
+    rows = [[ex["source"], ex["target"]] for ex in examples]
+    status = (
+        f"추출된 문장 중 {len(examples)}개로 번역투를 제안했습니다. "
+        "표를 검토/수정한 뒤 마음에 들면 그대로 '번역 실행'을 누르세요."
+    )
+    return status, rows
+
+
 def on_analyze(html_text, rule_text, provider_name, model_name, api_key, prior_code, prior_error):
     if not html_text:
         return "HTML 파일을 먼저 업로드하세요.", "", None, [], "", ""
@@ -201,6 +219,7 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     gr.Markdown("### 번역 스타일 프리셋")
     gr.Markdown("예: 원문 `hi` -> 번역 `안녕` 처럼 원하는 말투/스타일의 예시 몇 개를 적어두면 번역할 때 참고합니다.")
+    suggest_style_btn = gr.Button("추출된 문장으로 번역투 추천받기")
     style_table = gr.Dataframe(
         headers=["원문", "번역"], datatype=["str", "str"],
         row_count=(5, "dynamic"), column_count=(2, "fixed"),
@@ -240,6 +259,12 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     style_preset_dropdown.change(
         on_load_style_preset, inputs=[profile_state, style_preset_dropdown], outputs=style_table,
+    )
+
+    suggest_style_btn.click(
+        on_suggest_style,
+        inputs=[spans_state, provider_dropdown, model_dropdown, api_key_input, target_lang_input],
+        outputs=[style_status, style_table],
     )
 
     provider_dropdown.change(

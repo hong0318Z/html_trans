@@ -86,6 +86,26 @@ def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: 
     return {texts[int(k)]: v for k, v in result.items() if k.isdigit() and int(k) < len(texts)}
 
 
+def sample_for_style(unique_texts: list, n: int = 10) -> list:
+    if len(unique_texts) <= n:
+        return list(unique_texts)
+    step = len(unique_texts) / n
+    indices = sorted({int(i * step) for i in range(n)})
+    return [unique_texts[i] for i in indices]
+
+
+def suggest_style_examples(api_key: str, provider_cfg: dict, unique_texts: list, target_lang: str,
+                            n: int = 10) -> list:
+    sample_texts = sample_for_style(unique_texts, n)
+    if not sample_texts:
+        return []
+    try:
+        result = translate_batch(api_key, provider_cfg, sample_texts, target_lang)
+    except Exception:
+        result = {}
+    return [{"source": t, "target": result.get(t, "")} for t in sample_texts]
+
+
 def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
                    num_batches: int, style_examples: list = None, progress_cb=None) -> dict:
     unique_texts, span_to_unique = dedup_spans(spans)
