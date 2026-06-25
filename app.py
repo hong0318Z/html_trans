@@ -13,11 +13,39 @@ from llm_client import PROVIDERS
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
 
 
+def _resolve_upload_path(file):
+    if file is None:
+        return None
+    if isinstance(file, (list, tuple)):
+        file = file[0] if file else None
+    if file is None:
+        return None
+    if isinstance(file, dict):
+        return file.get("path") or file.get("name")
+    return getattr(file, "path", None) or getattr(file, "name", None) or str(file)
+
+
 def on_upload(file):
     if file is None:
         return "", "파일을 업로드하세요."
-    text = Path(file).read_text(encoding="utf-8", errors="replace")
-    return text, f"{len(text.splitlines())}줄, {len(text)}자 로드됨."
+    path = _resolve_upload_path(file)
+    if not path:
+        return "", f"업로드된 파일 경로를 확인할 수 없습니다. (받은 값: {file!r})"
+
+    p = Path(path)
+    if not p.exists():
+        return "", f"파일이 서버에 존재하지 않습니다: {path}"
+
+    size = p.stat().st_size
+    if size == 0:
+        return "", f"파일이 0바이트입니다 (경로: {path}). 업로드가 끝나기 전에 읽힌 것 같습니다."
+
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return "", f"파일 읽기 실패 ({path}, {size}바이트): {e}"
+
+    return text, f"{len(text.splitlines())}줄, {len(text)}자 로드됨. (파일 크기: {size}바이트)"
 
 
 def refresh_profile_list():
