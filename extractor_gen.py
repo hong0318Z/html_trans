@@ -9,7 +9,10 @@ describing where translatable text lives in that file.
 Respond with ONLY a single fenced python code block containing exactly one function:
 
 def extract(html: str) -> list[dict]:
-    # Return [{"start": int, "end": int, "text": str}, ...]
+    # Return [{"start": int, "end": int, "text": str, "speaker": str}, ...]
+    # "speaker" is optional: include it only when the rule describes per-character/
+    # per-speaker dialogue, using the speaker identifier as it appears in the markup
+    # (e.g. a Twine macro/tag name). Omit it entirely if there is no such concept.
     # html[start:end] must equal text exactly.
     # Return [] if nothing matches. Never raise; skip anything that doesn't fit cleanly.
     ...

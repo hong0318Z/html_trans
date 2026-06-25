@@ -59,7 +59,10 @@ def validate_spans(spans: list, html: str) -> tuple:
         if html[start:end] != text:
             bad_offsets += 1
             continue
-        valid.append({"start": start, "end": end, "text": text})
+        clean = {"start": start, "end": end, "text": text}
+        if span.get("speaker"):
+            clean["speaker"] = span["speaker"]
+        valid.append(clean)
 
     if bad_offsets:
         warnings.append(f"{bad_offsets} of {len(spans)} spans had bad offsets and were dropped.")

@@ -15,7 +15,9 @@ _DEFAULT_RULE_TEXT = (
     "보존하고 나머지 자연어 부분만 번역 대상으로 포함한다. Twine으로 컴파일된 HTML은 "
     "`<tw-passagedata>` 안에 원본 텍스트가 HTML 엔티티로 escape되어 `&lt;&lt;이름&gt;&gt;대사"
     "&lt;&lt;/이름&gt;&gt;` 형태로 저장되어 있을 수도 있다 (literal `<<`가 아니라 `&lt;&lt;`). "
-    "두 형태(escape됨/안 됨) 모두 처리해야 한다."
+    "두 형태(escape됨/안 됨) 모두 처리해야 한다. 각 span에는 화자 식별자를 "
+    "\"speaker\" 키로 함께 반환한다 (예: {\"start\":.., \"end\":.., \"text\":.., \"speaker\": \"Amy\"}). "
+    "이 speaker 값은 캐릭터별 번역투 설정에 쓰인다."
 )
 
 _DEFAULT_EXTRACTION_CODE = '''import re
@@ -28,13 +30,14 @@ def extract(html: str) -> list:
     ]
     for pattern in patterns:
         for m in re.finditer(pattern, html, re.DOTALL):
+            speaker = m.group(1)
             body = m.group(2)
             stripped = body.strip()
             if not stripped:
                 continue
             offset = body.find(stripped)
             start = m.start(2) + offset
-            spans.append({"start": start, "end": start + len(stripped), "text": stripped})
+            spans.append({"start": start, "end": start + len(stripped), "text": stripped, "speaker": speaker})
         if spans:
             break
     return spans
@@ -51,6 +54,7 @@ def _default_profile() -> dict:
         "extraction_code": _DEFAULT_EXTRACTION_CODE,
         "target_lang": "English",
         "style_presets": [],
+        "character_styles": {},
         "created_at": "",
         "updated_at": "",
     }
@@ -114,6 +118,7 @@ def new_profile(game_name: str, rule_text: str = "") -> dict:
         "extraction_code": "",
         "target_lang": "English",
         "style_presets": [],
+        "character_styles": {},
     }
 
 

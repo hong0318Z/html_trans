@@ -31,6 +31,31 @@ def dedup_spans(spans: list) -> tuple:
     return unique_texts, span_to_unique
 
 
+def dedup_spans_by_speaker(spans: list) -> tuple:
+    """Like dedup_spans, but keyed by (speaker, text) so the same line said by
+    two different characters can get different translations/style."""
+    unique = []
+    key_to_idx = {}
+    span_to_unique = {}
+    for i, span in enumerate(spans):
+        speaker = span.get("speaker") or "_"
+        text = span["text"]
+        key = (speaker, text)
+        if key not in key_to_idx:
+            key_to_idx[key] = len(unique)
+            unique.append({"speaker": speaker, "text": text})
+        span_to_unique[i] = key_to_idx[key]
+    return unique, span_to_unique
+
+
+def text_frequencies(spans: list) -> tuple:
+    unique_texts, span_to_unique = dedup_spans(spans)
+    counts = [0] * len(unique_texts)
+    for unique_idx in span_to_unique.values():
+        counts[unique_idx] += 1
+    return unique_texts, counts
+
+
 def recommended_batch_count(unique_texts: list, chars_per_batch: int = 4000) -> int:
     total_chars = sum(len(t) for t in unique_texts)
     if not unique_texts:
@@ -86,17 +111,20 @@ def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: 
     return {texts[int(k)]: v for k, v in result.items() if k.isdigit() and int(k) < len(texts)}
 
 
-def sample_for_style(unique_texts: list, n: int = 10) -> list:
+def sample_for_style(spans: list, n: int = 10) -> list:
+    """Pick representative texts to ask the user about, biased towards the
+    most frequently repeated lines (these matter most for a consistent tone)."""
+    unique_texts, counts = text_frequencies(spans)
     if len(unique_texts) <= n:
         return list(unique_texts)
-    step = len(unique_texts) / n
-    indices = sorted({int(i * step) for i in range(n)})
-    return [unique_texts[i] for i in indices]
+    order = sorted(range(len(unique_texts)), key=lambda i: counts[i], reverse=True)
+    top = sorted(order[:n])
+    return [unique_texts[i] for i in top]
 
 
-def suggest_style_examples(api_key: str, provider_cfg: dict, unique_texts: list, target_lang: str,
+def suggest_style_examples(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
                             n: int = 10) -> list:
-    sample_texts = sample_for_style(unique_texts, n)
+    sample_texts = sample_for_style(spans, n)
     if not sample_texts:
         return []
     try:
@@ -107,30 +135,47 @@ def suggest_style_examples(api_key: str, provider_cfg: dict, unique_texts: list,
 
 
 def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
-                   num_batches: int, style_examples: list = None, progress_cb=None) -> dict:
-    unique_texts, span_to_unique = dedup_spans(spans)
-    batches = make_batches(unique_texts, num_batches)
+                   num_batches: int, style_examples: list = None, char_style_examples: dict = None,
+                   progress_cb=None) -> dict:
+    """Translate spans, batching per speaker so each character's lines can use
+    that character's own style examples (falling back to the global ones)."""
+    unique, span_to_unique = dedup_spans_by_speaker(spans)
 
-    text_translations = {}
-    failed_texts = []
-    total = len(batches)
-    for done, batch_indices in enumerate(batches):
-        texts = [unique_texts[i] for i in batch_indices]
+    by_speaker = {}
+    for i, u in enumerate(unique):
+        by_speaker.setdefault(u["speaker"], []).append(i)
+
+    total_chars = sum(len(u["text"]) for u in unique) or 1
+    batch_jobs = []  # (speaker, [unique_idx, ...])
+    for speaker, idxs in by_speaker.items():
+        texts = [unique[i]["text"] for i in idxs]
+        share = sum(len(t) for t in texts) / total_chars
+        speaker_batches = max(1, round(num_batches * share))
+        for sub in make_batches(texts, speaker_batches):
+            batch_jobs.append((speaker, [idxs[j] for j in sub]))
+
+    idx_translations = {}
+    failed_indices = []
+    total = len(batch_jobs)
+    for done, (speaker, idxs) in enumerate(batch_jobs):
+        texts = [unique[i]["text"] for i in idxs]
+        examples = (char_style_examples or {}).get(speaker) or style_examples
         try:
-            result = translate_batch(api_key, provider_cfg, texts, target_lang, style_examples)
-            text_translations.update(result)
-            for t in texts:
-                if t not in result:
-                    failed_texts.append(t)
+            result = translate_batch(api_key, provider_cfg, texts, target_lang, examples)
+            for i, t in zip(idxs, texts):
+                if t in result:
+                    idx_translations[i] = result[t]
+                else:
+                    failed_indices.append(i)
         except Exception:
-            failed_texts.extend(texts)
+            failed_indices.extend(idxs)
         if progress_cb:
             progress_cb(done + 1, total)
 
     translations = {}
     for span_idx, unique_idx in span_to_unique.items():
-        text = unique_texts[unique_idx]
-        if text in text_translations:
-            translations[span_idx] = text_translations[text]
+        if unique_idx in idx_translations:
+            translations[span_idx] = idx_translations[unique_idx]
 
+    failed_texts = [unique[i]["text"] for i in failed_indices]
     return {"translations": translations, "failed_texts": failed_texts}

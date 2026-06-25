@@ -71,14 +71,15 @@ def refresh_profile_list():
 
 def on_profile_select(game_name):
     if not game_name:
-        return "", "", "English", None, gr.update(choices=[])
+        return "", "", "English", None, gr.update(choices=[]), {}
     for p in profiles.list_profiles():
         if p["game_name"] == game_name:
             prof = profiles.load_profile(p["slug"])
             preset_names = profiles.list_style_presets(prof)
             return (prof.get("rule_text", ""), prof.get("extraction_code", ""),
-                    prof.get("target_lang", "English"), prof, gr.update(choices=preset_names))
-    return "", "", "English", None, gr.update(choices=[])
+                    prof.get("target_lang", "English"), prof, gr.update(choices=preset_names),
+                    prof.get("character_styles", {}))
+    return "", "", "English", None, gr.update(choices=[]), {}
 
 
 def _table_to_examples(table) -> list:
@@ -122,22 +123,56 @@ def on_load_style_preset(profile_state, preset_name):
     return [[ex["source"], ex["target"]] for ex in preset["examples"]]
 
 
-def on_suggest_style(spans, provider_name, model_name, api_key, target_lang):
+def get_speakers(spans) -> list:
+    seen = []
+    for s in spans or []:
+        sp = s.get("speaker")
+        if sp and sp not in seen:
+            seen.append(sp)
+    return sorted(seen)
+
+
+def on_suggest_style(spans, character, provider_name, model_name, api_key, target_lang):
     if not spans:
         return "먼저 분석을 실행해 추출 결과를 만들어주세요.", gr.update()
 
+    target_spans = spans
+    if character and character != "(전체)":
+        target_spans = [s for s in spans if s.get("speaker") == character]
+        if not target_spans:
+            return f"'{character}' 화자의 문장이 없습니다.", gr.update()
+
     provider_cfg = {"base_url": PROVIDERS[provider_name]["base_url"], "model": model_name}
-    unique_texts, _ = translator.dedup_spans(spans)
-    examples = translator.suggest_style_examples(api_key, provider_cfg, unique_texts, target_lang)
+    examples = translator.suggest_style_examples(api_key, provider_cfg, target_spans, target_lang)
     if not examples:
         return "추천할 문장이 없습니다.", gr.update()
 
     rows = [[ex["source"], ex["target"]] for ex in examples]
+    who = f"'{character}'의 " if character and character != "(전체)" else ""
     status = (
-        f"추출된 문장 중 {len(examples)}개로 번역투를 제안했습니다. "
-        "표를 검토/수정한 뒤 마음에 들면 그대로 '번역 실행'을 누르세요."
+        f"{who}추출된 문장 중 {len(examples)}개로 번역투를 제안했습니다. "
+        "표를 검토/수정한 뒤 마음에 들면 캐릭터를 선택한 상태로 '이 캐릭터의 말투로 저장'을 누르거나, "
+        "그대로 '번역 실행'을 누르세요."
     )
     return status, rows
+
+
+def on_save_character_style(character, table, char_styles_state):
+    char_styles_state = dict(char_styles_state or {})
+    if not character or character == "(전체)":
+        return "캐릭터를 먼저 선택하세요. (전체는 위 표가 그대로 전역 스타일로 쓰입니다)", char_styles_state
+    examples = _table_to_examples(table)
+    char_styles_state[character] = examples
+    return f"'{character}' 캐릭터의 말투로 {len(examples)}개 예시를 저장했습니다.", char_styles_state
+
+
+def on_character_select(character, char_styles_state):
+    if not character or character == "(전체)":
+        return gr.update()
+    examples = (char_styles_state or {}).get(character)
+    if not examples:
+        return gr.update()
+    return [[ex["source"], ex["target"]] for ex in examples]
 
 
 def on_generate_code(html_text, rule_text, provider_name, model_name, api_key, prior_code, prior_status):
@@ -162,22 +197,23 @@ def on_generate_code(html_text, rule_text, provider_name, model_name, api_key, p
 
 
 def run_extraction_only(html_text, code):
+    no_speaker_update = gr.update(choices=["(전체)"], value="(전체)")
     if not html_text or not code:
-        return "HTML과 추출 코드가 모두 필요합니다.", code or "", None, [], "", None
+        return "HTML과 추출 코드가 모두 필요합니다.", code or "", None, [], "", None, no_speaker_update
 
     result = extractor_run.run_extraction(code, html_text)
     if result["error"]:
         msg = result["error"]
         if result["raised"]:
             msg += f"\n\n{result['raised']}"
-        return msg, code, None, [], "", None
+        return msg, code, None, [], "", None, no_speaker_update
 
     spans, warnings = extractor_run.validate_spans(result["spans"], html_text)
     if not spans:
         msg = "매치된 텍스트가 없습니다. 규칙 설명을 더 구체적으로 작성한 뒤 재생성하세요."
         if warnings:
             msg += "\n" + "\n".join(warnings)
-        return msg, code, None, [], "", None
+        return msg, code, None, [], "", None, no_speaker_update
 
     unique_texts, _ = translator.dedup_spans(spans)
     recommended = translator.recommended_batch_count(unique_texts)
@@ -186,10 +222,12 @@ def run_extraction_only(html_text, code):
         status += "\n" + "\n".join(warnings)
 
     preview = [[s["text"][:200]] for s in spans[:30]]
-    return status, code, spans, preview, str(len(spans)), recommended
+    speakers = get_speakers(spans)
+    speaker_update = gr.update(choices=["(전체)"] + speakers, value="(전체)")
+    return status, code, spans, preview, str(len(spans)), recommended, speaker_update
 
 
-def on_save_profile(game_name, rule_text, code, target_lang, existing_profile):
+def on_save_profile(game_name, rule_text, code, target_lang, existing_profile, char_styles_state):
     if not game_name.strip():
         return "게임 이름을 입력하세요.", existing_profile
     if existing_profile and existing_profile.get("game_name") == game_name:
@@ -199,12 +237,13 @@ def on_save_profile(game_name, rule_text, code, target_lang, existing_profile):
     prof["rule_text"] = rule_text
     prof["extraction_code"] = code
     prof["target_lang"] = target_lang
+    prof["character_styles"] = char_styles_state or {}
     profiles.save_profile(prof)
     return f"프로필 '{game_name}' 저장됨.", prof
 
 
 def on_translate(html_text, spans, provider_name, model_name, api_key, target_lang, num_batches,
-                  style_table, progress=gr.Progress()):
+                  style_table, char_styles_state, progress=gr.Progress()):
     if not html_text or not spans:
         return None, "먼저 분석을 실행해 추출 결과를 만들어주세요."
 
@@ -216,7 +255,7 @@ def on_translate(html_text, spans, provider_name, model_name, api_key, target_la
 
     result = translator.translate_all(
         api_key, provider_cfg, spans, target_lang, int(num_batches),
-        style_examples=style_examples, progress_cb=cb,
+        style_examples=style_examples, char_style_examples=char_styles_state, progress_cb=cb,
     )
     translated_html = reinserter.reinsert(html_text, spans, result["translations"])
 
@@ -232,6 +271,7 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     html_state = gr.State("")
     spans_state = gr.State(None)
     profile_state = gr.State(None)
+    character_styles_state = gr.State({})
 
     gr.Markdown("## HTML 게임 번역 도구")
 
@@ -266,9 +306,13 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     total_spans_box = gr.Textbox(label="전체 추출 문장 수", interactive=False)
 
     gr.Markdown("### 3단계: 번역투 협의")
-    gr.Markdown("추출된 문장 중 일부를 AI에게 보여주고 번역 결과를 미리 받아본 뒤, 검토/수정해서 전체 번역의 스타일로 사용합니다.")
+    gr.Markdown("추출된 문장 중 자주 반복되는 문장 위주로 AI에게 보여주고 번역 결과를 미리 받아본 뒤, 검토/수정해서 전체 번역의 스타일로 사용합니다.")
     gr.Markdown("예: 원문 `hi` -> 번역 `안녕` 처럼 원하는 말투/스타일의 예시 몇 개를 적어두면 번역할 때 참고합니다.")
-    suggest_style_btn = gr.Button("3단계: 추출된 문장으로 번역투 추천받기")
+    gr.Markdown("캐릭터(화자)를 선택하면 그 캐릭터의 대사만 추천받아 캐릭터별로 다른 말투를 지정할 수 있습니다. `(전체)`는 캐릭터 구분이 없거나 공통으로 쓰일 기본 스타일입니다.")
+    with gr.Row():
+        character_dropdown = gr.Dropdown(label="캐릭터 선택", choices=["(전체)"], value="(전체)", allow_custom_value=True)
+        suggest_style_btn = gr.Button("선택한 캐릭터의 문장으로 번역투 추천받기")
+        save_char_style_btn = gr.Button("이 캐릭터의 말투로 저장")
     style_table = gr.Dataframe(
         headers=["원문", "번역"], datatype=["str", "str"],
         row_count=(5, "dynamic"), column_count=(2, "fixed"),
@@ -286,9 +330,11 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     translate_summary = gr.Textbox(label="번역 결과", interactive=False)
     download_file = gr.File(label="번역된 HTML 다운로드")
 
+    extraction_outputs = [analysis_status, code_box, spans_state, preview_table, total_spans_box,
+                          batch_count_input, character_dropdown]
+
     file_input.upload(on_upload, inputs=file_input, outputs=[html_state, upload_status]).then(
-        run_extraction_only, inputs=[html_state, code_box],
-        outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
+        run_extraction_only, inputs=[html_state, code_box], outputs=extraction_outputs,
     )
 
     refresh_btn.click(refresh_profile_list, outputs=profile_dropdown)
@@ -296,10 +342,10 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     profile_dropdown.change(
         on_profile_select, inputs=profile_dropdown,
-        outputs=[rule_text_input, code_box, target_lang_input, profile_state, style_preset_dropdown],
+        outputs=[rule_text_input, code_box, target_lang_input, profile_state, style_preset_dropdown,
+                 character_styles_state],
     ).then(
-        run_extraction_only, inputs=[html_state, code_box],
-        outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
+        run_extraction_only, inputs=[html_state, code_box], outputs=extraction_outputs,
     )
     profile_dropdown.change(lambda name: name, inputs=profile_dropdown, outputs=game_name_input)
 
@@ -315,8 +361,18 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     suggest_style_btn.click(
         on_suggest_style,
-        inputs=[spans_state, provider_dropdown, model_dropdown, api_key_input, target_lang_input],
+        inputs=[spans_state, character_dropdown, provider_dropdown, model_dropdown, api_key_input, target_lang_input],
         outputs=[style_status, style_table],
+    )
+
+    save_char_style_btn.click(
+        on_save_character_style,
+        inputs=[character_dropdown, style_table, character_styles_state],
+        outputs=[style_status, character_styles_state],
+    )
+
+    character_dropdown.change(
+        on_character_select, inputs=[character_dropdown, character_styles_state], outputs=style_table,
     )
 
     provider_dropdown.change(
@@ -332,20 +388,19 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
 
     extract_btn.click(
         run_extraction_only,
-        inputs=[html_state, code_box],
-        outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
+        inputs=[html_state, code_box], outputs=extraction_outputs,
     )
 
     save_profile_btn.click(
         on_save_profile,
-        inputs=[game_name_input, rule_text_input, code_box, target_lang_input, profile_state],
+        inputs=[game_name_input, rule_text_input, code_box, target_lang_input, profile_state, character_styles_state],
         outputs=[save_status, profile_state],
     )
 
     translate_btn.click(
         on_translate,
         inputs=[html_state, spans_state, provider_dropdown, model_dropdown, api_key_input,
-                target_lang_input, batch_count_input, style_table],
+                target_lang_input, batch_count_input, style_table, character_styles_state],
         outputs=[download_file, translate_summary],
     )
 
