@@ -96,23 +96,25 @@ def on_suggest_style(spans, provider_name, model_name, api_key, target_lang):
     return status, rows
 
 
-def on_analyze(html_text, rule_text, provider_name, model_name, api_key, prior_code, prior_error):
+def on_generate_code(html_text, rule_text, provider_name, model_name, api_key, prior_code, prior_status):
     if not html_text:
-        return "HTML 파일을 먼저 업로드하세요.", "", None, [], "", None
+        return "HTML 파일을 먼저 업로드하세요.", prior_code or ""
     if not rule_text.strip():
-        return "추출 규칙을 입력하세요.", "", None, [], "", None
+        return "추출 규칙을 입력하세요.", prior_code or ""
 
     provider_cfg = {"base_url": PROVIDERS[provider_name]["base_url"], "model": model_name}
     sample = sampler.sample_html(html_text, rule_text)
+    is_error_status = bool(prior_status) and "추출됨" not in prior_status
+    prior_error = prior_status if is_error_status else None
     try:
         code = extractor_gen.generate_extraction_code(
             api_key, provider_cfg, sample, rule_text,
-            prior_code=prior_code or None, prior_error=prior_error or None,
+            prior_code=prior_code or None, prior_error=prior_error,
         )
     except Exception as e:
-        return f"코드 생성 실패: {e}", prior_code or "", None, [], "", None
+        return f"코드 생성 실패: {e}", prior_code or ""
 
-    return run_extraction_only(html_text, code)
+    return "추출 코드가 생성되었습니다. 아래 '2단계: 추출 실행'을 눌러 결과를 확인하세요.", code
 
 
 def run_extraction_only(html_text, code):
@@ -198,28 +200,31 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
         refresh_btn = gr.Button("프로필 목록 새로고침")
         game_name_input = gr.Textbox(label="게임 이름")
 
-    rule_text_input = gr.Textbox(label="추출 규칙 (자연어로 설명)", lines=6)
-
     with gr.Row():
         provider_dropdown = gr.Dropdown(label="제공자", choices=list(PROVIDERS.keys()), value=list(PROVIDERS.keys())[0])
         model_dropdown = gr.Dropdown(label="모델", choices=PROVIDERS[list(PROVIDERS.keys())[0]]["models"])
         api_key_input = gr.Textbox(label="API 키", type="password")
         target_lang_input = gr.Dropdown(label="목표 언어", choices=["English", "한국어", "日本語", "中文"], value="English", allow_custom_value=True)
 
-    with gr.Row():
-        analyze_btn = gr.Button("분석 (규칙 -> 추출 코드 생성 및 실행)")
-        rerun_btn = gr.Button("코드만 재실행")
-
-    analysis_status = gr.Textbox(label="분석 상태", interactive=False, lines=4)
+    gr.Markdown("### 1단계: 추출 규칙 만들기 (AI)")
+    gr.Markdown("어떤 텍스트를 추출할지 자연어로 설명하면, AI가 그 설명을 보고 파이썬이 실제로 문서에서 텍스트를 긁어올 추출 코드를 만듭니다.")
+    rule_text_input = gr.Textbox(label="추출 규칙 (자연어로 설명)", lines=6)
+    generate_code_btn = gr.Button("1단계: AI로 추출 코드 생성")
     code_box = gr.Code(label="생성된 추출 코드 (직접 수정 가능)", language="python")
-    preview_table = gr.Dataframe(headers=["추출된 텍스트"], label="추출 미리보기 (최대 30개)")
-
-    save_profile_btn = gr.Button("프로필 저장")
+    save_profile_btn = gr.Button("프로필로 저장 (규칙 + 코드 재사용)")
     save_status = gr.Textbox(label="저장 상태", interactive=False)
 
-    gr.Markdown("### 번역 스타일 프리셋")
+    gr.Markdown("### 2단계: 추출 실행 (번역할 문장 뽑기)")
+    gr.Markdown("AI 호출 없이 파이썬이 위 코드를 그대로 실행해 문서 전체에서 텍스트를 긁어옵니다.")
+    extract_btn = gr.Button("2단계: 추출 실행")
+    analysis_status = gr.Textbox(label="상태 (규칙 생성 / 추출 결과)", interactive=False, lines=4)
+    preview_table = gr.Dataframe(headers=["추출된 텍스트"], label="추출 미리보기 (최대 30개)")
+    total_spans_box = gr.Textbox(label="전체 추출 문장 수", interactive=False)
+
+    gr.Markdown("### 3단계: 번역투 협의")
+    gr.Markdown("추출된 문장 중 일부를 AI에게 보여주고 번역 결과를 미리 받아본 뒤, 검토/수정해서 전체 번역의 스타일로 사용합니다.")
     gr.Markdown("예: 원문 `hi` -> 번역 `안녕` 처럼 원하는 말투/스타일의 예시 몇 개를 적어두면 번역할 때 참고합니다.")
-    suggest_style_btn = gr.Button("추출된 문장으로 번역투 추천받기")
+    suggest_style_btn = gr.Button("3단계: 추출된 문장으로 번역투 추천받기")
     style_table = gr.Dataframe(
         headers=["원문", "번역"], datatype=["str", "str"],
         row_count=(5, "dynamic"), column_count=(2, "fixed"),
@@ -231,16 +236,13 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
         style_preset_dropdown = gr.Dropdown(label="저장된 프리셋 불러오기", choices=[])
     style_status = gr.Textbox(label="프리셋 상태", interactive=False)
 
-    gr.Markdown("### 번역")
-    with gr.Row():
-        total_spans_box = gr.Textbox(label="전체 추출 문장 수", interactive=False)
-        batch_count_input = gr.Number(label="번역 호출을 나눌 횟수 (배치 개수)", value=1, precision=0)
-
-    translate_btn = gr.Button("번역 실행")
+    gr.Markdown("### 4단계: 번역 실행")
+    batch_count_input = gr.Number(label="번역 호출을 나눌 횟수 (배치 개수)", value=1, precision=0)
+    translate_btn = gr.Button("4단계: 번역 실행")
     translate_summary = gr.Textbox(label="번역 결과", interactive=False)
     download_file = gr.File(label="번역된 HTML 다운로드")
 
-    file_input.change(on_upload, inputs=file_input, outputs=[html_state, upload_status]).then(
+    file_input.upload(on_upload, inputs=file_input, outputs=[html_state, upload_status]).then(
         run_extraction_only, inputs=[html_state, code_box],
         outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
     )
@@ -278,16 +280,13 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
         inputs=provider_dropdown, outputs=model_dropdown,
     )
 
-    prior_code_state = gr.State("")
-    prior_error_state = gr.State("")
-
-    analyze_btn.click(
-        on_analyze,
-        inputs=[html_state, rule_text_input, provider_dropdown, model_dropdown, api_key_input, code_box, prior_error_state],
-        outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
+    generate_code_btn.click(
+        on_generate_code,
+        inputs=[html_state, rule_text_input, provider_dropdown, model_dropdown, api_key_input, code_box, analysis_status],
+        outputs=[analysis_status, code_box],
     )
 
-    rerun_btn.click(
+    extract_btn.click(
         run_extraction_only,
         inputs=[html_state, code_box],
         outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
