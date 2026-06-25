@@ -3,13 +3,18 @@ import queue as queue_module
 import re
 import traceback
 
-# Matches a Twine/Harlowe-style macro tag, both literal (`<<name>>`) and
-# HTML-entity-escaped (`&lt;&lt;name&gt;&gt;`) forms. If extracted "text" still
-# contains one of these, the extraction rule grabbed more than the plain
-# sentence -- translating it risks rewording/rewriting the macro syntax itself
-# (mismatched tag names, dropped slashes, etc.), which breaks the game even
-# though every span individually still satisfies html[start:end] == text.
-_MACRO_TAG_RE = re.compile(r"<<\s*/?\s*[A-Za-z_]\w*|&lt;&lt;\s*/?\s*[A-Za-z_]\w*")
+# Matches a Twine/Harlowe-style macro *closing* tag, both literal
+# (`<</name>>`) and HTML-entity-escaped (`&lt;&lt;/name&gt;&gt;`) forms. If
+# extracted "text" still contains one of these, it swallowed an entire
+# open+close macro pair (e.g. <<widget>>...<<nobr>>...<</nobr>>...<</widget>>)
+# as plain text -- translating that risks rewording the tag syntax itself and
+# desyncing the pair, which breaks the game.
+#
+# A lone self-closing/inline macro with no closing tag (e.g. <<s $familyName>>)
+# is intentionally NOT matched here: it has no pairing to desync, and the
+# default rule_text explicitly tells the LLM to preserve such placeholders
+# verbatim while translating the surrounding sentence.
+_MACRO_TAG_RE = re.compile(r"<<\s*/\s*[A-Za-z_]\w*|&lt;&lt;\s*/\s*[A-Za-z_]\w*")
 
 
 def _contains_macro_tag(text: str) -> bool:
