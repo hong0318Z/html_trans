@@ -1,3 +1,4 @@
+import re
 import time
 from pathlib import Path
 
@@ -12,6 +13,11 @@ import translator
 from llm_client import PROVIDERS
 
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
+
+
+def _checkpoint_path(game_name: str) -> Path:
+    slug = re.sub(r"[^a-zA-Z0-9가-힣]+", "-", (game_name or "").strip().lower()).strip("-") or "untitled"
+    return OUTPUTS_DIR / f"{slug}.checkpoint.json"
 
 
 def _resolve_upload_path(file):
@@ -243,9 +249,14 @@ def on_save_profile(game_name, rule_text, code, target_lang, existing_profile, c
 
 
 def on_translate(html_text, spans, provider_name, model_name, api_key, target_lang, num_batches,
-                  style_table, char_styles_state, progress=gr.Progress()):
+                  style_table, char_styles_state, game_name, fresh_start, progress=gr.Progress()):
     if not html_text or not spans:
         return None, "먼저 분석을 실행해 추출 결과를 만들어주세요."
+
+    checkpoint_path = _checkpoint_path(game_name)
+    resumed = (not fresh_start) and checkpoint_path.exists()
+    if fresh_start and checkpoint_path.exists():
+        checkpoint_path.unlink()
 
     provider_cfg = {"base_url": PROVIDERS[provider_name]["base_url"], "model": model_name}
     style_examples = _table_to_examples(style_table)
@@ -256,6 +267,7 @@ def on_translate(html_text, spans, provider_name, model_name, api_key, target_la
     result = translator.translate_all(
         api_key, provider_cfg, spans, target_lang, int(num_batches),
         style_examples=style_examples, char_style_examples=char_styles_state, progress_cb=cb,
+        checkpoint_path=str(checkpoint_path),
     )
     translated_html = reinserter.reinsert(html_text, spans, result["translations"])
 
@@ -264,6 +276,27 @@ def on_translate(html_text, spans, provider_name, model_name, api_key, target_la
     out_path.write_text(translated_html, encoding="utf-8")
 
     summary = f"{len(result['translations'])}개 번역 완료, {len(result['failed_texts'])}개 실패(원문 유지)."
+    if resumed:
+        summary += " (이전 체크포인트에서 이어서 진행됨)"
+    return str(out_path), summary
+
+
+def on_build_from_checkpoint(html_text, spans, game_name):
+    if not html_text or not spans:
+        return None, "먼저 분석을 실행해 추출 결과를 만들어주세요."
+
+    checkpoint_path = _checkpoint_path(game_name)
+    if not checkpoint_path.exists():
+        return None, "저장된 체크포인트가 없습니다. 번역을 한 번이라도 실행한 뒤 다시 시도하세요."
+
+    translations = translator.translations_from_checkpoint(spans, str(checkpoint_path))
+    translated_html = reinserter.reinsert(html_text, spans, translations)
+
+    OUTPUTS_DIR.mkdir(exist_ok=True)
+    out_path = OUTPUTS_DIR / "translated_partial.html"
+    out_path.write_text(translated_html, encoding="utf-8")
+
+    summary = f"체크포인트 기준 {len(translations)}/{len(spans)}개 번역됨. 나머지는 원문이 그대로 들어갑니다."
     return str(out_path), summary
 
 
@@ -325,8 +358,13 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     style_status = gr.Textbox(label="프리셋 상태", interactive=False)
 
     gr.Markdown("### 4단계: 번역 실행")
+    gr.Markdown("번역은 배치가 끝날 때마다 진행 상황을 체크포인트 파일로 저장합니다. 중간에 끊기거나 앱이 종료돼도 "
+                "아래 '체크포인트로 지금까지 결과 받기' 버튼으로 그때까지 번역된 부분만 반영된 HTML을 받을 수 있고, "
+                "'번역 실행'을 다시 누르면 처음부터가 아니라 멈췄던 지점부터 이어서 진행됩니다.")
     batch_count_input = gr.Number(label="번역 호출을 나눌 횟수 (배치 개수)", value=1, precision=0)
+    fresh_start_checkbox = gr.Checkbox(label="체크포인트 무시하고 처음부터 새로 번역", value=False)
     translate_btn = gr.Button("4단계: 번역 실행")
+    build_checkpoint_btn = gr.Button("체크포인트로 지금까지 결과 받기")
     translate_summary = gr.Textbox(label="번역 결과", interactive=False)
     download_file = gr.File(label="번역된 HTML 다운로드")
 
@@ -400,7 +438,14 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     translate_btn.click(
         on_translate,
         inputs=[html_state, spans_state, provider_dropdown, model_dropdown, api_key_input,
-                target_lang_input, batch_count_input, style_table, character_styles_state],
+                target_lang_input, batch_count_input, style_table, character_styles_state,
+                game_name_input, fresh_start_checkbox],
+        outputs=[download_file, translate_summary],
+    )
+
+    build_checkpoint_btn.click(
+        on_build_from_checkpoint,
+        inputs=[html_state, spans_state, game_name_input],
         outputs=[download_file, translate_summary],
     )
 

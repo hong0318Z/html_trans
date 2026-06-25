@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import llm_client
 
@@ -134,18 +135,76 @@ def suggest_style_examples(api_key: str, provider_cfg: dict, spans: list, target
     return [{"source": t, "target": result.get(t, "")} for t in sample_texts]
 
 
+def _checkpoint_key(speaker: str, text: str) -> str:
+    return f"{speaker}\x1f{text}"
+
+
+def load_checkpoint(checkpoint_path: str) -> dict:
+    if not checkpoint_path:
+        return {}
+    path = Path(checkpoint_path)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_checkpoint(checkpoint_path: str, mapping: dict) -> None:
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def translations_from_checkpoint(spans: list, checkpoint_path: str) -> dict:
+    """Map whatever's already in the checkpoint back onto span indices, so a
+    partial/interrupted run's progress can be reinserted without waiting for
+    the rest of the translation to finish."""
+    checkpoint = load_checkpoint(checkpoint_path)
+    unique, span_to_unique = dedup_spans_by_speaker(spans)
+    idx_translations = {}
+    for i, u in enumerate(unique):
+        key = _checkpoint_key(u["speaker"], u["text"])
+        if key in checkpoint:
+            idx_translations[i] = checkpoint[key]
+
+    translations = {}
+    for span_idx, unique_idx in span_to_unique.items():
+        if unique_idx in idx_translations:
+            translations[span_idx] = idx_translations[unique_idx]
+    return translations
+
+
 def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: str,
                    num_batches: int, style_examples: list = None, char_style_examples: dict = None,
-                   progress_cb=None) -> dict:
+                   progress_cb=None, checkpoint_path: str = None) -> dict:
     """Translate spans, batching per speaker so each character's lines can use
-    that character's own style examples (falling back to the global ones)."""
+    that character's own style examples (falling back to the global ones).
+
+    If checkpoint_path is given, already-translated (speaker, text) pairs found
+    there are reused (resuming a previously interrupted run), and progress is
+    written back to the same file after every batch so an interruption never
+    loses more than one batch's worth of work."""
     unique, span_to_unique = dedup_spans_by_speaker(spans)
+    checkpoint = load_checkpoint(checkpoint_path)
+
+    idx_translations = {}
+    remaining_idx = []
+    for i, u in enumerate(unique):
+        key = checkpoint.get(_checkpoint_key(u["speaker"], u["text"]))
+        if key is not None:
+            idx_translations[i] = key
+        else:
+            remaining_idx.append(i)
 
     by_speaker = {}
-    for i, u in enumerate(unique):
-        by_speaker.setdefault(u["speaker"], []).append(i)
+    for i in remaining_idx:
+        by_speaker.setdefault(unique[i]["speaker"], []).append(i)
 
-    total_chars = sum(len(u["text"]) for u in unique) or 1
+    total_chars = sum(len(unique[i]["text"]) for i in remaining_idx) or 1
     batch_jobs = []  # (speaker, [unique_idx, ...])
     for speaker, idxs in by_speaker.items():
         texts = [unique[i]["text"] for i in idxs]
@@ -154,7 +213,6 @@ def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: st
         for sub in make_batches(texts, speaker_batches):
             batch_jobs.append((speaker, [idxs[j] for j in sub]))
 
-    idx_translations = {}
     failed_indices = []
     total = len(batch_jobs)
     for done, (speaker, idxs) in enumerate(batch_jobs):
@@ -165,10 +223,13 @@ def translate_all(api_key: str, provider_cfg: dict, spans: list, target_lang: st
             for i, t in zip(idxs, texts):
                 if t in result:
                     idx_translations[i] = result[t]
+                    checkpoint[_checkpoint_key(speaker, t)] = result[t]
                 else:
                     failed_indices.append(i)
         except Exception:
             failed_indices.extend(idxs)
+        if checkpoint_path:
+            save_checkpoint(checkpoint_path, checkpoint)
         if progress_cb:
             progress_cb(done + 1, total)
 
