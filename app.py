@@ -98,9 +98,9 @@ def on_suggest_style(spans, provider_name, model_name, api_key, target_lang):
 
 def on_analyze(html_text, rule_text, provider_name, model_name, api_key, prior_code, prior_error):
     if not html_text:
-        return "HTML 파일을 먼저 업로드하세요.", "", None, [], "", ""
+        return "HTML 파일을 먼저 업로드하세요.", "", None, [], "", None
     if not rule_text.strip():
-        return "추출 규칙을 입력하세요.", "", None, [], "", ""
+        return "추출 규칙을 입력하세요.", "", None, [], "", None
 
     provider_cfg = {"base_url": PROVIDERS[provider_name]["base_url"], "model": model_name}
     sample = sampler.sample_html(html_text, rule_text)
@@ -110,28 +110,28 @@ def on_analyze(html_text, rule_text, provider_name, model_name, api_key, prior_c
             prior_code=prior_code or None, prior_error=prior_error or None,
         )
     except Exception as e:
-        return f"코드 생성 실패: {e}", prior_code or "", None, [], "", ""
+        return f"코드 생성 실패: {e}", prior_code or "", None, [], "", None
 
     return run_extraction_only(html_text, code)
 
 
 def run_extraction_only(html_text, code):
     if not html_text or not code:
-        return "HTML과 추출 코드가 모두 필요합니다.", code or "", None, [], "", ""
+        return "HTML과 추출 코드가 모두 필요합니다.", code or "", None, [], "", None
 
     result = extractor_run.run_extraction(code, html_text)
     if result["error"]:
         msg = result["error"]
         if result["raised"]:
             msg += f"\n\n{result['raised']}"
-        return msg, code, None, [], "", ""
+        return msg, code, None, [], "", None
 
     spans, warnings = extractor_run.validate_spans(result["spans"], html_text)
     if not spans:
         msg = "매치된 텍스트가 없습니다. 규칙 설명을 더 구체적으로 작성한 뒤 재생성하세요."
         if warnings:
             msg += "\n" + "\n".join(warnings)
-        return msg, code, None, [], "", ""
+        return msg, code, None, [], "", None
 
     unique_texts, _ = translator.dedup_spans(spans)
     recommended = translator.recommended_batch_count(unique_texts)
