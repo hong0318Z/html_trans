@@ -1,6 +1,19 @@
 import multiprocessing
 import queue as queue_module
+import re
 import traceback
+
+# Matches a Twine/Harlowe-style macro tag, both literal (`<<name>>`) and
+# HTML-entity-escaped (`&lt;&lt;name&gt;&gt;`) forms. If extracted "text" still
+# contains one of these, the extraction rule grabbed more than the plain
+# sentence -- translating it risks rewording/rewriting the macro syntax itself
+# (mismatched tag names, dropped slashes, etc.), which breaks the game even
+# though every span individually still satisfies html[start:end] == text.
+_MACRO_TAG_RE = re.compile(r"<<\s*/?\s*[A-Za-z_]\w*|&lt;&lt;\s*/?\s*[A-Za-z_]\w*")
+
+
+def _contains_macro_tag(text: str) -> bool:
+    return bool(_MACRO_TAG_RE.search(text))
 
 
 def _worker(code_str: str, html: str, queue: multiprocessing.Queue) -> None:
@@ -66,6 +79,17 @@ def validate_spans(spans: list, html: str) -> tuple:
 
     if bad_offsets:
         warnings.append(f"{bad_offsets} of {len(spans)} spans had bad offsets and were dropped.")
+
+    embedded_tags = [s for s in valid if _contains_macro_tag(s["text"])]
+    if embedded_tags:
+        valid = [s for s in valid if not _contains_macro_tag(s["text"])]
+        examples = "; ".join(repr(s["text"][:60]) for s in embedded_tags[:3])
+        warnings.append(
+            f"{len(embedded_tags)} span(s) contained an embedded <<macro>> tag inside their text and were "
+            "dropped (translating them risks corrupting the tag itself, e.g. a mismatched/missing closing "
+            "tag). The extraction rule likely needs to stop at the nested tag instead of swallowing it. "
+            f"Examples: {examples}"
+        )
 
     overlap_pairs = check_overlaps(valid)
     if overlap_pairs:
