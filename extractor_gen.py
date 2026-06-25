@@ -10,9 +10,13 @@ Respond with ONLY a single fenced python code block containing exactly one funct
 
 def extract(html: str) -> list[dict]:
     # Return [{"start": int, "end": int, "text": str, "speaker": str}, ...]
-    # "speaker" is optional: include it only when the rule describes per-character/
-    # per-speaker dialogue, using the speaker identifier as it appears in the markup
-    # (e.g. a Twine macro/tag name). Omit it entirely if there is no such concept.
+    # ALWAYS set "speaker" to the name of the macro/tag/construct that text came from
+    # (e.g. "Amy" for a <<Amy>>...<</Amy>> dialogue pair, or "comment"/"button"/"avatar"
+    # for a <<comment ...>>/<<button ...>>/<<avatar ...>> macro argument). This lets a
+    # human later review and selectively enable/disable translation per tag type, so
+    # never omit it and never reuse one generic value for genuinely different
+    # macros/tags -- only group under the same value text that came from the same
+    # macro/tag name.
     # html[start:end] must equal text exactly.
     # Return [] if nothing matches. Never raise; skip anything that doesn't fit cleanly.
     ...
@@ -21,7 +25,10 @@ Rules:
 - Use only Python standard library (re, etc.). No third-party imports.
 - `extract` receives the FULL original file content at run time, not the sample shown to you.
 - Only include spans whose text is actually meant to be translated (per the rule below),
-  never markup/attribute names/JS keywords.
+  never markup/attribute names/JS keywords/identifiers/variable names/state keys that
+  game logic compares against -- when in doubt about whether a quoted argument is
+  player-facing display text vs. an internal identifier, prefer to skip it and let the
+  human re-review per tag rather than guessing.
 - No explanation text outside the code block.
 """
 

@@ -138,6 +138,25 @@ def get_speakers(spans) -> list:
     return sorted(seen)
 
 
+def tag_distribution(spans) -> list:
+    """[(tag, count, example_text), ...] sorted by count desc, "(태그 없음)" last."""
+    counts = {}
+    examples = {}
+    for s in spans or []:
+        tag = s.get("speaker") or "(태그 없음)"
+        counts[tag] = counts.get(tag, 0) + 1
+        examples.setdefault(tag, s["text"][:80])
+    rows = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return [[tag, count, examples[tag]] for tag, count in rows]
+
+
+def filter_spans_by_tags(spans, included_tags) -> list:
+    if included_tags is None:
+        return spans or []
+    included = set(included_tags)
+    return [s for s in (spans or []) if (s.get("speaker") or "(태그 없음)") in included]
+
+
 def on_suggest_style(spans, character, provider_name, model_name, api_key, target_lang):
     if not spans:
         return "먼저 분석을 실행해 추출 결과를 만들어주세요.", gr.update()
@@ -204,22 +223,23 @@ def on_generate_code(html_text, rule_text, provider_name, model_name, api_key, p
 
 def run_extraction_only(html_text, code):
     no_speaker_update = gr.update(choices=["(전체)"], value="(전체)")
+    no_tag_update = gr.update(choices=[], value=[])
     if not html_text or not code:
-        return "HTML과 추출 코드가 모두 필요합니다.", code or "", None, [], "", None, no_speaker_update
+        return "HTML과 추출 코드가 모두 필요합니다.", code or "", None, [], "", None, no_speaker_update, [], no_tag_update
 
     result = extractor_run.run_extraction(code, html_text)
     if result["error"]:
         msg = result["error"]
         if result["raised"]:
             msg += f"\n\n{result['raised']}"
-        return msg, code, None, [], "", None, no_speaker_update
+        return msg, code, None, [], "", None, no_speaker_update, [], no_tag_update
 
     spans, warnings = extractor_run.validate_spans(result["spans"], html_text)
     if not spans:
         msg = "매치된 텍스트가 없습니다. 규칙 설명을 더 구체적으로 작성한 뒤 재생성하세요."
         if warnings:
             msg += "\n" + "\n".join(warnings)
-        return msg, code, None, [], "", None, no_speaker_update
+        return msg, code, None, [], "", None, no_speaker_update, [], no_tag_update
 
     unique_texts, _ = translator.dedup_spans(spans)
     recommended = translator.recommended_batch_count(unique_texts)
@@ -230,7 +250,10 @@ def run_extraction_only(html_text, code):
     preview = [[s["text"][:200]] for s in spans[:30]]
     speakers = get_speakers(spans)
     speaker_update = gr.update(choices=["(전체)"] + speakers, value="(전체)")
-    return status, code, spans, preview, str(len(spans)), recommended, speaker_update
+    tag_rows = tag_distribution(spans)
+    all_tags = [row[0] for row in tag_rows]
+    tag_checkbox_update = gr.update(choices=all_tags, value=all_tags)
+    return status, code, spans, preview, str(len(spans)), recommended, speaker_update, tag_rows, tag_checkbox_update
 
 
 def on_save_profile(game_name, rule_text, code, target_lang, existing_profile, char_styles_state):
@@ -249,9 +272,14 @@ def on_save_profile(game_name, rule_text, code, target_lang, existing_profile, c
 
 
 def on_translate(html_text, spans, provider_name, model_name, api_key, target_lang, num_batches,
-                  style_table, char_styles_state, game_name, fresh_start, max_workers, progress=gr.Progress()):
+                  style_table, char_styles_state, game_name, fresh_start, max_workers, included_tags,
+                  progress=gr.Progress()):
     if not html_text or not spans:
         return None, "먼저 분석을 실행해 추출 결과를 만들어주세요."
+
+    active_spans = filter_spans_by_tags(spans, included_tags)
+    if not active_spans:
+        return None, "선택된 태그에 해당하는 문장이 없습니다. 번역할 태그를 선택하세요."
 
     checkpoint_path = _checkpoint_path(game_name)
     resumed = (not fresh_start) and checkpoint_path.exists()
@@ -265,17 +293,22 @@ def on_translate(html_text, spans, provider_name, model_name, api_key, target_la
         progress((done, total))
 
     result = translator.translate_all(
-        api_key, provider_cfg, spans, target_lang, int(num_batches),
+        api_key, provider_cfg, active_spans, target_lang, int(num_batches),
         style_examples=style_examples, char_style_examples=char_styles_state, progress_cb=cb,
         checkpoint_path=str(checkpoint_path), max_workers=int(max_workers),
     )
+    # Reinsert against the FULL span list so excluded tags' original text is
+    # never touched -- their indices simply have no entry in `translations`.
     translated_html = reinserter.reinsert(html_text, spans, result["translations"])
 
     OUTPUTS_DIR.mkdir(exist_ok=True)
     out_path = OUTPUTS_DIR / "translated.html"
     out_path.write_text(translated_html, encoding="utf-8")
 
+    skipped = len(spans) - len(active_spans)
     summary = f"{len(result['translations'])}개 번역 완료, {len(result['failed_texts'])}개 실패(원문 유지)."
+    if skipped:
+        summary += f" 선택 해제된 태그 {skipped}개 문장은 원문 그대로 유지됨."
     if resumed:
         summary += " (이전 체크포인트에서 이어서 진행됨)"
     return str(out_path), summary
@@ -337,6 +370,14 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     analysis_status = gr.Textbox(label="상태 (규칙 생성 / 추출 결과)", interactive=False, lines=4)
     preview_table = gr.Dataframe(headers=["추출된 텍스트"], label="추출 미리보기 (최대 30개)")
     total_spans_box = gr.Textbox(label="전체 추출 문장 수", interactive=False)
+    gr.Markdown(
+        "추출 코드가 만든 '태그'(speaker 필드, 보통 매크로/태그 이름)별로 몇 문장이 잡혔는지 아래에서 확인하고, "
+        "번역해도 안전한 태그만 체크하세요. 체크 해제한 태그는 번역 단계에서 완전히 건너뛰어 원문 그대로 남습니다. "
+        "한 번에 일부 태그만 켜서 번역 -> 다운로드 -> 게임에서 테스트 -> 문제 없으면 다음 태그도 켜서 다시 번역(체크포인트로 이어짐), "
+        "순서로 안전하게 늘려갈 수 있습니다."
+    )
+    tag_table = gr.Dataframe(headers=["태그", "개수", "예시"], label="태그별 분포", interactive=False)
+    tag_checkbox = gr.CheckboxGroup(label="번역에 포함할 태그", choices=[], value=[])
 
     gr.Markdown("### 3단계: 번역투 협의")
     gr.Markdown("추출된 문장 중 자주 반복되는 문장 위주로 AI에게 보여주고 번역 결과를 미리 받아본 뒤, 검토/수정해서 전체 번역의 스타일로 사용합니다.")
@@ -373,7 +414,7 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     download_file = gr.File(label="번역된 HTML 다운로드")
 
     extraction_outputs = [analysis_status, code_box, spans_state, preview_table, total_spans_box,
-                          batch_count_input, character_dropdown]
+                          batch_count_input, character_dropdown, tag_table, tag_checkbox]
 
     file_input.upload(on_upload, inputs=file_input, outputs=[html_state, upload_status]).then(
         run_extraction_only, inputs=[html_state, code_box], outputs=extraction_outputs,
@@ -443,7 +484,7 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
         on_translate,
         inputs=[html_state, spans_state, provider_dropdown, model_dropdown, api_key_input,
                 target_lang_input, batch_count_input, style_table, character_styles_state,
-                game_name_input, fresh_start_checkbox, max_workers_input],
+                game_name_input, fresh_start_checkbox, max_workers_input, tag_checkbox],
         outputs=[download_file, translate_summary],
     )
 
