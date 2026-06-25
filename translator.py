@@ -118,7 +118,11 @@ def translate_batch(api_key: str, provider_cfg: dict, texts: list, target_lang: 
         )
         result = json.loads(content)
 
-    return {texts[int(k)]: v for k, v in result.items() if k.isdigit() and int(k) < len(texts)}
+    # Extracted text is always pre-stripped of leading/trailing whitespace (see
+    # extraction code's body.strip()), but the LLM sometimes pads its answer
+    # with a leading/trailing newline -- reinserted verbatim, that turns into
+    # an extra rendered <br> that wasn't in the original markup.
+    return {texts[int(k)]: v.strip() for k, v in result.items() if k.isdigit() and int(k) < len(texts)}
 
 
 def sample_for_style(spans: list, n: int = 10) -> list:
