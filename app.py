@@ -186,7 +186,7 @@ def run_extraction_only(html_text, code):
         status += "\n" + "\n".join(warnings)
 
     preview = [[s["text"][:200]] for s in spans[:30]]
-    return status, code, spans, preview, str(len(spans)), str(recommended)
+    return status, code, spans, preview, str(len(spans)), recommended
 
 
 def on_save_profile(game_name, rule_text, code, target_lang, existing_profile):
