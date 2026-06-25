@@ -240,7 +240,10 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     translate_summary = gr.Textbox(label="번역 결과", interactive=False)
     download_file = gr.File(label="번역된 HTML 다운로드")
 
-    file_input.change(on_upload, inputs=file_input, outputs=[html_state, upload_status])
+    file_input.change(on_upload, inputs=file_input, outputs=[html_state, upload_status]).then(
+        run_extraction_only, inputs=[html_state, code_box],
+        outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
+    )
 
     refresh_btn.click(refresh_profile_list, outputs=profile_dropdown)
     demo.load(refresh_profile_list, outputs=profile_dropdown)
@@ -248,6 +251,9 @@ with gr.Blocks(title="HTML 게임 번역 도구") as demo:
     profile_dropdown.change(
         on_profile_select, inputs=profile_dropdown,
         outputs=[rule_text_input, code_box, target_lang_input, profile_state, style_preset_dropdown],
+    ).then(
+        run_extraction_only, inputs=[html_state, code_box],
+        outputs=[analysis_status, code_box, spans_state, preview_table, total_spans_box, batch_count_input],
     )
     profile_dropdown.change(lambda name: name, inputs=profile_dropdown, outputs=game_name_input)
 
